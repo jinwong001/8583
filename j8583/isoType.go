@@ -5,4 +5,5 @@ const (
 	VAR
 	LLVAR
 	LLLVAR
+	LLLLVAR
 )

@@ -4,42 +4,11 @@ import (
 	"fmt"
 	"errors"
 	"strconv"
+	"encoding/hex"
+	"bytes"
+	"8583/security"
+	"8583/utils"
 )
-
-//const (
-//	/** A fixed-length numeric value. It is zero-filled to the left. */
-//	NUMERIC = iota
-//	/** A fixed-length alphanumeric value. It is filled with spaces to the right. */
-//	ALPHA
-//	/** A variable length alphanumeric value with a 2-digit header length. */
-//	LLVAR
-//	/** A variable length alphanumeric value with a 3-digit header length. */
-//	LLLVAR
-//	/** A date in format YYYYMMddHHmmss */
-//	DATE14
-//	/** A date in format MMddHHmmss */
-//	DATE10
-//	/** A date in format MMdd */
-//	DATE4
-//	/** A date in format yyMM */
-//	DATE_EXP
-//	/** Time of day in format HHmmss */
-//	TIME
-//	/** An amount, expressed in cents with a fixed length of 12. */
-//	AMOUNT
-//	/** Similar to ALPHA but holds byte arrays instead of strings. */
-//	BINARY
-//	/** Similar to LLVAR but holds byte arrays instead of strings. */
-//	LLBIN
-//	/** Similar to LLLVAR but holds byte arrays instead of strings. */
-//	LLLBIN
-//	/** variable length with 4-digit header length. */
-//	LLLLVAR
-//	/** variable length byte array with 4-digit header length. */
-//	LLLLBIN
-//	/** Date in format yyMMddHHmmss. */
-//	DATE12
-//)
 
 type MessageCalculator interface {
 	calcMessage(message []byte) []byte
@@ -49,23 +18,10 @@ type Message struct {
 	Tpdu         string
 	Header       string
 	Mti          string
+	Bitmap       string
 	Fields       []Field
 	SecondBitmap bool
 }
-
-//public IsoField getValue(int index) {
-//if (index < 1 || index > 128) {
-//return null;
-//}
-//return fields[index];
-//}
-//
-//public void setValue(int index, IsoField isoField) {
-//if (index < 1 || index > 128) {
-//return;
-//}
-//fields[index] = isoField;
-//}
 
 func (m *Message)SetField(i int, field Field) {
 	if (i < 1 || i > m.fieldLength()) {
@@ -76,9 +32,16 @@ func (m *Message)SetField(i int, field Field) {
 
 func (m *Message)getField(i int) Field {
 	if (i < 1 || i > m.fieldLength()) {
-		return nil
+		return Field{}
 	}
 	return m.Fields[i]
+}
+
+func (m *Message)getFieldValue(i int) interface{} {
+	if (i < 1 || i > m.fieldLength()) {
+		return nil
+	}
+	return m.Fields[i].Value
 }
 
 func (m *Message)fieldLength() int {
@@ -89,47 +52,9 @@ func (m *Message)fieldLength() int {
 	return size;
 }
 
-func (m *Message)BytesWithLenHeader(ret []byte, err error) {
-	data, error := m.Bytes();
-	if error != nil {
-		return nil, err
-	}
-	return bcd([]byte(len(data) + 2)), nil;
-}
-
-
-// Bytes marshall Message to bytes
-func (m *Message) Bytes() (ret []byte, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = errors.New("Critical error:" + fmt.Sprint(r))
-			ret = nil
-		}
-	}()
-
-	ret = make([]byte, 0)
-
-	// generate MTI:
-	tpduBytes, err := m.encodeTpdu()
-	if err != nil {
-		return nil, err
-	}
-	ret = append(ret, tpduBytes...)
-
-	if len(m.Header) > 0 {
-		headerBytes, err := m.encodeHeader()
-		if err != nil {
-			return nil, err
-		}
-		ret = append(ret, headerBytes...)
-	}
-
-	mtiBytes, err := m.encodeMti()
-	if err != nil {
-		return nil, err
-	}
+func (m *Message) BytesFields() (ret []byte, err error) {
+	mtiBytes := lbcd([]byte(m.Mti))
 	ret = append(ret, mtiBytes...)
-
 	byteNum := 8
 	if m.SecondBitmap {
 		byteNum = 16
@@ -150,7 +75,7 @@ func (m *Message) Bytes() (ret []byte, err error) {
 
 			for i, f := range m.Fields {
 				//判断不好
-				if i < 2 || f == nil || f.Value == nil {
+				if i < 2 || f.Value == nil {
 					continue
 				}
 
@@ -173,11 +98,88 @@ func (m *Message) Bytes() (ret []byte, err error) {
 	return ret, nil
 }
 
+
+// Bytes marshall Message to bytes
+func (m *Message) Bytes(tdk string) (ret []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.New("Critical error:" + fmt.Sprint(r))
+			ret = nil
+		}
+	}()
+
+	ret = make([]byte, 0)
+
+	tpduBytes, err := m.encodeTpdu()
+	if err != nil {
+		return nil, err
+	}
+	ret = append(ret, tpduBytes...)
+
+	if len(m.Header) > 0 {
+		headerBytes, err := m.encodeHeader()
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, headerBytes...)
+	}
+
+	fieldsByte, err := m.BytesFields()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(tdk) == 0 {
+		ret = append(ret, fieldsByte...)
+		return ret, nil
+	}
+
+	hexByte1, err := hex.DecodeString("E6")
+	if err != nil {
+		return nil, err
+	}
+	ret = append(ret, hexByte1...)
+	if value42, ok := m.Fields[42].Value.(string); ok {
+		ret = append(ret, []byte(value42)...)
+	}
+	if value41, ok := m.Fields[42].Value.(string); ok {
+		ret = append(ret, []byte(value41)...)
+	}
+	ret = append(ret, []byte(fmt.Sprintf("%04d", len(fieldsByte)))...)
+	ret = append(ret, []byte("000000000000")...)
+
+	hexByte2, err := hex.DecodeString(tdk)
+	if err != nil {
+		return nil, err
+	}
+
+	encryBytes, err := security.EncryptWithDESKey(fieldsByte, hexByte2)
+	if err != nil {
+		return nil, err
+	}
+
+	ret = append(ret, encryBytes...)
+
+	return ret, nil
+}
+
+func (m *Message) BytesLenHeader(tdk string) (ret []byte, err error) {
+	data, err := m.Bytes(tdk)
+	if err != nil {
+		return nil, err
+	}
+	length := len(data)
+	buf := bytes.NewBuffer(utils.Int2Byte((length & 0xff00) >> 8))
+	buf.WriteByte((byte)((length & 0x00ff)))
+	buf.Write(data)
+	return buf.Bytes(), nil
+}
+
 func (m *Message) encodeTpdu() ([]byte, error) {
 	if m.Tpdu == "" {
 		return nil, errors.New("tpdu is required")
 	}
-	if len(m.Tpdu) != 4 {
+	if len(m.Tpdu) != 10 {
 		return nil, errors.New("tpdu is invalid")
 	}
 
@@ -203,44 +205,24 @@ func (m *Message) encodeHeader() ([]byte, error) {
 	return bcd([]byte(m.Header)), nil
 }
 
-func (m *Message) encodeMti() ([]byte, error) {
-	if m.Mti == "" {
-		return nil, errors.New("MTI is required")
-	}
-	if len(m.Mti) != 4 {
-		return nil, errors.New("MTI is invalid")
-	}
-
-	// check MTI, it must contain only digits
-	if _, err := strconv.Atoi(m.Mti); err != nil {
-		return nil, errors.New("MTI is invalid")
-	}
-
-	return bcd([]byte(m.Mti)), nil
-}
-
-// Load unmarshall Message from bytes
-func (m *Message) Load(raw []byte) (err error) {
+func Decode(raw []byte) (m *Message, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = errors.New("Critical error:" + fmt.Sprint(r))
+			m = nil
 		}
 	}()
 
-	if m.Mti == "" {
-		m.Mti, err = decodeMti(raw, m.MtiEncode)
-		if err != nil {
-			return err
-		}
-	}
-	start := 4
-	if m.MtiEncode == BCD {
-		start = 2
-	}
+	tpdu, err := decodeMti(raw[:5], BCD, 10)
+	isoHeader, err := decodeMti(raw[5:11], BCD, 12)
+	mti, err := decodeMti(raw[11:13], BCD, 4)
+	bitmap := utils.EncodeToString(raw[13:21])
+	m = &Message{Tpdu:tpdu, Mti:mti, Header:isoHeader, Bitmap:bitmap, SecondBitmap:false}
 
-	fields := parseFields(m.Data)
+	fields := parseFields()
 
 	byteNum := 8
+	start := 21
 	if raw[start] & 0x80 == 0x80 {
 		// 1st bit == 1
 		m.SecondBitmap = true
@@ -263,17 +245,128 @@ func (m *Message) Load(raw []byte) (err error) {
 			}
 			f, ok := fields[i]
 			if !ok {
-				return fmt.Errorf("field %d not defined", i)
+				return nil, fmt.Errorf("field %d not defined", i)
 			}
-			l, err := f.Field.Load(raw[start:], f.Encode, f.LenEncode, f.Length)
+
+			l, err := f.load(raw[start:])
 			if err != nil {
-				return fmt.Errorf("field %d: %s", i, err)
+				return nil, fmt.Errorf("field %d: %s", i, err)
 			}
 			start += l
 		}
 	}
-	return nil
+	return m, err
 }
+
+func DecodeDes(raw []byte, tdk string) (m *Message, err error) {
+	minSize := 10 / 2 + 10 % 2 + 12 / 2 + 12 % 2 + 1 / 2 + 1 + 39
+	if len(raw) <= 0 {
+		return nil, errors.New("buf size is not enough")
+	}
+
+	if len(tdk) <= 0 {
+		return nil, errors.New("messageCalculator should not be null")
+	}
+
+	hexByte, err := hex.DecodeString(tdk)
+	if err != nil {
+		return nil, err
+	}
+
+	encryBytes, err := security.EncryptWithDESKey(raw[minSize:], hexByte)
+	if err != nil {
+		return nil, err
+	}
+
+	data := append(raw[:minSize - 1 - 39], encryBytes...)
+
+	return Decode(data)
+}
+
+func parseFields() map[int]*Field {
+	fieldmap := make(map[int]*Field, 0)
+	fieldmap[2] = &Field{IsoType:LLVAR, Encoder:BCD, }
+	fieldmap[3] = &Field{IsoType:FIXED, Encoder:BCD, Length:6, }
+	fieldmap[4] = &Field{IsoType:FIXED, Encoder:BCD, Length:12, }
+	fieldmap[6] = &Field{IsoType:FIXED, Encoder:BCD, Length:12, }
+	fieldmap[10] = &Field{IsoType:FIXED, Encoder:BCD, Length:8, }
+	fieldmap[11] = &Field{IsoType:FIXED, Encoder:BCD, Length:6, }
+	fieldmap[12] = &Field{IsoType:FIXED, Encoder:BCD, Length:6, }
+	fieldmap[13] = &Field{IsoType:FIXED, Encoder:BCD, Length:4, }
+	fieldmap[14] = &Field{IsoType:FIXED, Encoder:BCD, Length:4, }
+	fieldmap[15] = &Field{IsoType:FIXED, Encoder:BCD, Length:4, }
+	fieldmap[22] = &Field{IsoType:FIXED, Encoder:BCD, Length:3, }
+	fieldmap[23] = &Field{IsoType:FIXED, Encoder:rBCD, Length:3, }
+	fieldmap[25] = &Field{IsoType:FIXED, Encoder:BCD, Length:2, }
+	fieldmap[26] = &Field{IsoType:FIXED, Encoder:BCD, Length:2, }
+
+	fieldmap[32] = &Field{IsoType:LLVAR, Encoder:BCD, }
+	fieldmap[35] = &Field{IsoType:LLVAR, Encoder:BCD, }
+
+	fieldmap[37] = &Field{IsoType:FIXED, Encoder:ASCII, Length:12, }
+	fieldmap[38] = &Field{IsoType:FIXED, Encoder:ASCII, Length:6, }
+	fieldmap[39] = &Field{IsoType:FIXED, Encoder:ASCII, Length:2, }
+	fieldmap[41] = &Field{IsoType:FIXED, Encoder:ASCII, Length:8, }
+	fieldmap[42] = &Field{IsoType:FIXED, Encoder:ASCII, Length:15, }
+
+	fieldmap[44] = &Field{IsoType:LLVAR, Encoder:BCD, }
+	fieldmap[46] = &Field{IsoType:LLLVAR, Encoder:BCD, }
+	fieldmap[48] = &Field{IsoType:LLLVAR, Encoder:BCD, }
+
+	fieldmap[49] = &Field{IsoType:FIXED, Encoder:ASCII, Length:3, }
+	fieldmap[51] = &Field{IsoType:FIXED, Encoder:ASCII, Length:3, }
+	fieldmap[52] = &Field{IsoType:FIXED, Encoder:BINARY, Length:8, }
+	fieldmap[53] = &Field{IsoType:FIXED, Encoder:BCD, Length:16, }
+
+	fieldmap[54] = &Field{IsoType:LLLVAR, Encoder:ASCII, }
+	fieldmap[55] = &Field{IsoType:LLLVAR, Encoder:BINARY, }
+	fieldmap[57] = &Field{IsoType:LLLVAR, Encoder:ASCII, }
+
+	subField60 := make([]*SubField, 5)
+	subField60[0] = &SubField{IsoType:FIXED, Encoder:BCD, Length:2, }
+	subField60[1] = &SubField{IsoType:FIXED, Encoder:BCD, Length:6, }
+	subField60[2] = &SubField{IsoType:FIXED, Encoder:BCD, Length:3, }
+	subField60[3] = &SubField{IsoType:FIXED, Encoder:BCD, Length:1, }
+	subField60[4] = &SubField{IsoType:FIXED, Encoder:BCD, Length:1, }
+	fieldmap[60] = NewSubField(LLLVAR, BCD, subField60)
+
+	subField61 := make([]*SubField, 3)
+	subField61[0] = &SubField{IsoType:FIXED, Encoder:BCD, Length:6, }
+	subField61[1] = &SubField{IsoType:FIXED, Encoder:BCD, Length:6, }
+	subField61[2] = &SubField{IsoType:FIXED, Encoder:BCD, Length:4, }
+	fieldmap[61] = NewSubField(LLLVAR, BCD, subField61)
+
+	fieldmap[62] = &Field{IsoType:LLLVAR, Encoder:BINARY, }
+
+	subField63 := make([]*SubField, 1)
+	subField63[0] = &SubField{IsoType:FIXED, Encoder:BCD, Length:3, }
+	fieldmap[63] = NewSubField(LLLVAR, BCD, subField63)
+
+	fieldmap[64] = &Field{IsoType:FIXED, Encoder:BINARY, Length:8, }
+	return fieldmap
+}
+
+func decodeMti(raw []byte, encode int, length int) (string, error) {
+	if encode == BCD {
+		length = length / 2
+	}
+	if len(raw) < length {
+		return "", errors.New("bad raw data")
+	}
+
+	var result string
+	switch encode {
+	case ASCII:
+		result = string(raw[:length])
+	case BCD:
+		result = string(bcd2Ascii(raw[:length]))
+	default:
+		return "", errors.New("invalid encode type")
+	}
+	return result, nil
+}
+
+
 
 
 
